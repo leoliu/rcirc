@@ -2842,5 +2842,4 @@ Passwords are stored in `rcirc-authinfo' (which see)."
 
 (provide 'rcirc)
 
-;; arch-tag: b471b7e8-6b5a-4399-b2c6-a3c78dfc8ffb
 ;;; rcirc.el ends here
