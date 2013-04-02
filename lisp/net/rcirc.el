@@ -215,12 +215,14 @@ The ARGUMENTS for each METHOD symbol are:
   `nickserv': NICK PASSWORD [NICKSERV-NICK]
   `chanserv': NICK CHANNEL PASSWORD
   `bitlbee': NICK PASSWORD
+  `quakenet': ACCOUNT PASSWORD
 
 Examples:
  ((\"freenode\" nickserv \"bob\" \"p455w0rd\")
   (\"freenode\" chanserv \"bob\" \"#bobland\" \"passwd99\")
   (\"bitlbee\" bitlbee \"robert\" \"sekrit\")
-  (\"dal.net\" nickserv \"bob\" \"sekrit\" \"NickServ@services.dal.net\"))"
+  (\"dal.net\" nickserv \"bob\" \"sekrit\" \"NickServ@services.dal.net\")
+  (\"quakenet.org\" quakenet \"bobby\" \"sekrit\"))"
   :type '(alist :key-type (string :tag "Server")
 		:value-type (choice (list :tag "NickServ"
 					  (const nickserv)
@@ -234,7 +236,11 @@ Examples:
 				    (list :tag "BitlBee"
 					  (const bitlbee)
 					  (string :tag "Nick")
-					  (string :tag "Password"))))
+					  (string :tag "Password"))
+                                    (list :tag "QuakeNet"
+                                          (const quakenet)
+                                          (string :tag "Account")
+                                          (string :tag "Password"))))
   :group 'rcirc)
 
 (defcustom rcirc-auto-authenticate-flag t
@@ -400,7 +406,7 @@ will be killed."
   "The channel or user associated with this buffer.")
 
 (defvar rcirc-urls nil
-  "List of urls seen in the current buffer.")
+  "List of URLs seen in the current buffer and their start positions.")
 (put 'rcirc-urls 'permanent-local t)
 
 (defvar rcirc-timeout-seconds 600
@@ -459,15 +465,7 @@ If ARG is non-nil, instead prompt for connection parameters."
 							   :channels)
 						" "))
 			"[, ]+" t))
-             (encryption
-              (intern (completing-read "Encryption (default plain): "
-                                       '("plain" "tls")
-                                       nil t
-                                       (let ((choice (plist-get server-plist
-                                                                :encryption)))
-                                         (when choice
-                                           (symbol-name choice)))
-                                       nil "plain"))))
+             (encryption (rcirc-prompt-for-encryption server-plist)))
 	(rcirc-connect server port nick user-name
 		       rcirc-default-full-name
 		       channels password encryption))
@@ -597,6 +595,22 @@ If ARG is non-nil, instead prompt for connection parameters."
   `(with-current-buffer rcirc-server-buffer
      ,@body))
 
+(defun rcirc-float-time ()
+  (if (featurep 'xemacs)
+      (time-to-seconds (current-time))
+    (float-time)))
+
+(defun rcirc-prompt-for-encryption (server-plist)
+  "Prompt the user for the encryption method to use.
+SERVER-PLIST is the property list for the server."
+  (let ((msg "Encryption (default %s): ")
+        (choices '("plain" "tls"))
+        (default (or (plist-get server-plist :encryption)
+                     'plain)))
+    (intern
+     (completing-read (format msg default)
+                      choices nil t nil nil (symbol-name default)))))
+
 (defun rcirc-keepalive ()
   "Send keep alive pings to active rcirc processes.
 Kill processes that have not received a server message since the
@@ -605,27 +619,22 @@ last ping."
       (mapc (lambda (process)
 	      (with-rcirc-process-buffer process
 		(when (not rcirc-connecting)
-		  (rcirc-send-string process
-				     (format "PRIVMSG %s :\C-aKEEPALIVE %f\C-a"
-					     rcirc-nick
-                                             (if (featurep 'xemacs)
-                                                 (time-to-seconds
-                                                  (current-time))
-                                               (float-time)))))))
+                  (rcirc-send-ctcp process
+                                   rcirc-nick
+                                   (format "KEEPALIVE %f"
+                                           (rcirc-float-time))))))
             (rcirc-process-list))
     ;; no processes, clean up timer
-    (cancel-timer rcirc-keepalive-timer)
+    (when (timerp rcirc-keepalive-timer)
+      (cancel-timer rcirc-keepalive-timer))
     (setq rcirc-keepalive-timer nil)))
 
 (defun rcirc-handler-ctcp-KEEPALIVE (process target sender message)
   (with-rcirc-process-buffer process
-    (setq header-line-format (format "%f" (- (if (featurep 'xemacs)
-                                                 (time-to-seconds
-                                                  (current-time))
-                                               (float-time))
+    (setq header-line-format (format "%f" (- (rcirc-float-time)
 					     (string-to-number message))))))
 
-(defvar rcirc-debug-buffer " *rcirc debug*")
+(defvar rcirc-debug-buffer "*rcirc debug*")
 (defvar rcirc-debug-flag nil
   "If non-nil, write information to `rcirc-debug-buffer'.")
 (defun rcirc-debug (process text)
@@ -761,6 +770,14 @@ Function is called with PROCESS, COMMAND, SENDER, ARGS and LINE.")
              (process-name process)))
     (rcirc-debug process string)
     (process-send-string process string)))
+
+(defun rcirc-send-privmsg (process target string)
+  (rcirc-send-string process (format "PRIVMSG %s :%s" target string)))
+
+(defun rcirc-send-ctcp (process target request &optional args)
+  (let ((args (if args (concat " " args) "")))
+    (rcirc-send-privmsg process target
+                        (format "\C-a%s%s\C-a" request args))))
 
 (defun rcirc-buffer-process (&optional buffer)
   "Return the process associated with channel BUFFER.
@@ -997,7 +1014,7 @@ This number is independent of the number of lines in the buffer.")
   (setq buffer-invisibility-spec '())
   (setq buffer-display-table (make-display-table))
   (set-display-table-slot buffer-display-table 4
-			  (let ((glyph (make-glyph-code 
+			  (let ((glyph (make-glyph-code
 					?. 'font-lock-keyword-face)))
 			    (make-vector 3 glyph)))
 
@@ -1169,7 +1186,7 @@ Create the buffer if it doesn't exist."
 			   (rcirc-generate-new-buffer-name process target))))
 	  (with-current-buffer new-buffer
 	    (rcirc-mode process target)
-	    (rcirc-put-nick-channel process (rcirc-nick process) target 
+	    (rcirc-put-nick-channel process (rcirc-nick process) target
 				    rcirc-current-line))
 	  new-buffer)))))
 
@@ -1194,7 +1211,7 @@ Create the buffer if it doesn't exist."
     (goto-char (point-max))
     (when (not (equal 0 (- (point) rcirc-prompt-end-marker)))
       ;; delete a trailing newline
-      (when (bolp)
+      (when (eq (point) (point-at-bol))
 	(delete-char -1))
       (let ((input (buffer-substring-no-properties
 		    rcirc-prompt-end-marker (point))))
@@ -1256,7 +1273,7 @@ Create the buffer if it doesn't exist."
   (interactive)
   (let ((pos (1+ (- (point) rcirc-prompt-end-marker))))
     (goto-char (point-max))
-    (let ((text (buffer-substring-no-properties rcirc-prompt-end-marker 
+    (let ((text (buffer-substring-no-properties rcirc-prompt-end-marker
 						(point)))
           (parent (buffer-name)))
       (delete-region rcirc-prompt-end-marker (point))
@@ -1498,7 +1515,7 @@ record activity."
 			       (match-string 1 text)))
 			   rcirc-ignore-list))
 	       ;; do not ignore if we sent the message
- 	       (not (string= sender (rcirc-nick process))))    
+ 	       (not (string= sender (rcirc-nick process))))
     (let* ((buffer (rcirc-target-buffer process sender response target text))
 	   (inhibit-read-only t))
       (with-current-buffer buffer
@@ -1674,8 +1691,8 @@ log-files with absolute names (see `rcirc-log-filename-function')."
 (defun rcirc-view-log-file ()
   "View logfile corresponding to the current buffer."
   (interactive)
-  (find-file-other-window 
-   (expand-file-name (funcall rcirc-log-filename-function 
+  (find-file-other-window
+   (expand-file-name (funcall rcirc-log-filename-function
 			      (rcirc-buffer-process) rcirc-target)
 		     rcirc-log-directory)))
 
@@ -2270,28 +2287,25 @@ With a prefix arg, prompt for new topic."
              (function (intern-soft (concat "rcirc-ctcp-sender-" request))))
         (if (fboundp function) ;; use special function if available
             (funcall function process target request)
-          (rcirc-send-string process
-                             (format "PRIVMSG %s :\C-a%s\C-a"
-                                     target request))))
+          (rcirc-send-ctcp process target request)))
     (rcirc-print process (rcirc-nick process) "ERROR" nil
                  "usage: /ctcp NICK REQUEST")))
 
 (defun rcirc-ctcp-sender-PING (process target request)
   "Send a CTCP PING message to TARGET."
-  (let ((timestamp (format "%.0f" (float-time))))
-    (rcirc-send-string process
-                       (format "PRIVMSG %s :\C-aPING %s\C-a" target timestamp))))
+  (let ((timestamp (format "%.0f" (rcirc-float-time))))
+    (rcirc-send-ctcp process target "PING" timestamp)))
 
 (defun rcirc-cmd-me (args &optional process target)
-  (rcirc-send-string process (format "PRIVMSG %s :\C-aACTION %s\C-a"
-                                     target args)))
+  (rcirc-send-ctcp process target "ACTION" args))
 
-(defun rcirc-add-or-remove (set &optional elt)
-  (if (and elt (not (string= "" elt)))
-      (if (member-ignore-case elt set)
-	  (delete elt set)
-	(cons elt set))
-    set))
+(defun rcirc-add-or-remove (set &rest elements)
+  (dolist (elt elements)
+    (if (and elt (not (string= "" elt)))
+	(setq set (if (member-ignore-case elt set)
+		      (delete elt set)
+		    (cons elt set)))))
+  set)
 
 (defun-rcirc-command ignore (nick)
   "Manage the ignore list.
@@ -2299,7 +2313,9 @@ Ignore NICK, unignore NICK if already ignored, or list ignored
 nicks when no NICK is given.  When listing ignored nicks, the
 ones added to the list automatically are marked with an asterisk."
   (interactive "sToggle ignoring of nick: ")
-  (setq rcirc-ignore-list (rcirc-add-or-remove rcirc-ignore-list nick))
+  (setq rcirc-ignore-list
+	(apply #'rcirc-add-or-remove rcirc-ignore-list
+	       (split-string nick nil t)))
   (rcirc-print process nil "IGNORE" target
 	       (mapconcat
 		(lambda (nick)
@@ -2311,14 +2327,18 @@ ones added to the list automatically are marked with an asterisk."
 (defun-rcirc-command bright (nick)
   "Manage the bright nick list."
   (interactive "sToggle emphasis of nick: ")
-  (setq rcirc-bright-nicks (rcirc-add-or-remove rcirc-bright-nicks nick))
+  (setq rcirc-bright-nicks
+	(apply #'rcirc-add-or-remove rcirc-bright-nicks
+	       (split-string nick nil t)))
   (rcirc-print process nil "BRIGHT" target
 	       (mapconcat 'identity rcirc-bright-nicks " ")))
 
 (defun-rcirc-command dim (nick)
   "Manage the dim nick list."
   (interactive "sToggle deemphasis of nick: ")
-  (setq rcirc-dim-nicks (rcirc-add-or-remove rcirc-dim-nicks nick))
+  (setq rcirc-dim-nicks
+	(apply #'rcirc-add-or-remove rcirc-dim-nicks
+	       (split-string nick nil t)))
   (rcirc-print process nil "DIM" target
 	       (mapconcat 'identity rcirc-dim-nicks " ")))
 
@@ -2327,7 +2347,9 @@ ones added to the list automatically are marked with an asterisk."
 Mark KEYWORD, unmark KEYWORD if already marked, or list marked
 keywords when no KEYWORD is given."
   (interactive "sToggle highlighting of keyword: ")
-  (setq rcirc-keywords (rcirc-add-or-remove rcirc-keywords keyword))
+  (setq rcirc-keywords
+	(apply #'rcirc-add-or-remove rcirc-keywords
+	       (split-string keyword nil t)))
   (rcirc-print process nil "KEYWORD" target
 	       (mapconcat 'identity rcirc-keywords " ")))
 
@@ -2351,31 +2373,45 @@ keywords when no KEYWORD is given."
     string))
 
 (defvar rcirc-url-regexp
-  (rx-to-string
-   `(and word-boundary
-	 (or (and
-	      (or (and (or "http" "https" "ftp" "file" "gopher" "news"
-			   "telnet" "wais" "mailto")
-		       "://")
-		  "www.")
-	      (1+ (char "-a-zA-Z0-9_."))
-	      (1+ (char "-a-zA-Z0-9_"))
-	      (optional ":" (1+ (char "0-9"))))
-	     (and (1+ (char "-a-zA-Z0-9_."))
-		  (or ".com" ".net" ".org")
-		  word-boundary))
-	 (optional
-	  (and "/"
-	       (1+ (char "-a-zA-Z0-9_='!?#$\@~`%&*+|\\/:;.,{}[]()"))
-	       (char "-a-zA-Z0-9_=#$\@~`%&*+|\\/:;{}[]()")))))
+  (concat
+   "\\b\\(\\(www\\.\\|\\(s?https?\\|ftp\\|file\\|gopher\\|"
+   "nntp\\|news\\|telnet\\|wais\\|mailto\\|info\\):\\)"
+   "\\(//[-a-z0-9_.]+:[0-9]*\\)?"
+   (if (string-match "[[:digit:]]" "1") ;; Support POSIX?
+       (let ((chars "-a-z0-9_=#$@~%&*+\\/[:word:]")
+	     (punct "!?:;.,"))
+	 (concat
+	  "\\(?:"
+	  ;; Match paired parentheses, e.g. in Wikipedia URLs:
+	  "[" chars punct "]+" "(" "[" chars punct "]+" "[" chars "]*)" "[" chars "]"
+	  "\\|"
+	  "[" chars punct     "]+" "[" chars "]"
+	  "\\)"))
+     (concat ;; XEmacs 21.4 doesn't support POSIX.
+      "\\([-a-z0-9_=!?#$@~%&*+\\/:;.,]\\|\\w\\)+"
+      "\\([-a-z0-9_=#$@~%&*+\\/]\\|\\w\\)"))
+   "\\)")
   "Regexp matching URLs.  Set to nil to disable URL features in rcirc.")
 
+;; cf cl-remove-if-not
+(defun rcirc-condition-filter (condp lst)
+  "Remove all items not satisfying condition CONDP in list LST.
+CONDP is a function that takes a list element as argument and returns
+non-nil if that element should be included.  Returns a new list."
+  (delq nil (mapcar (lambda (x) (and (funcall condp x) x)) lst)))
+
 (defun rcirc-browse-url (&optional arg)
-  "Prompt for URL to browse based on URLs in buffer."
+  "Prompt for URL to browse based on URLs in buffer before point.
+
+If ARG is given, opens the URL in a new browser window."
   (interactive "P")
-  (let ((completions (mapcar (lambda (x) (cons x nil)) rcirc-urls))
-        (initial-input (car rcirc-urls))
-        (history (cdr rcirc-urls)))
+  (let* ((point (point))
+         (filtered (rcirc-condition-filter
+                    (lambda (x) (>= point (cdr x)))
+                    rcirc-urls))
+         (completions (mapcar (lambda (x) (car x)) filtered))
+         (initial-input (caar filtered))
+         (history (mapcar (lambda (x) (car x)) (cdr filtered))))
     (browse-url (completing-read "rcirc browse-url: "
                                  completions nil nil initial-input 'history)
                 arg)))
@@ -2419,17 +2455,19 @@ keywords when no KEYWORD is given."
 (defun rcirc-markup-urls (sender response)
   (while (and rcirc-url-regexp ;; nil means disable URL catching
               (re-search-forward rcirc-url-regexp nil t))
-    (let ((start (match-beginning 0))
-	  (end (match-end 0))
-	  (url (match-string-no-properties 0)))
+    (let* ((start (match-beginning 0))
+           (end (match-end 0))
+           (url (match-string-no-properties 0))
+           (link-text (buffer-substring-no-properties start end)))
       (make-button start end
 		   'face 'rcirc-url
 		   'follow-link t
 		   'rcirc-url url
 		   'action (lambda (button)
 			     (browse-url (button-get button 'rcirc-url))))
-      ;; record the url
-      (push url rcirc-urls))))
+      ;; record the url if it is not already the latest stored url
+      (when (not (string= link-text (caar rcirc-urls)))
+        (push (cons link-text start) rcirc-urls)))))
 
 (defun rcirc-markup-keywords (sender response)
   (when (and (string= response "PRIVMSG")
@@ -2464,7 +2502,7 @@ keywords when no KEYWORD is given."
 				 rcirc-fill-column)
 				(t fill-column))
 			  ;; make sure ... doesn't cause line wrapping
-			  3)))		
+			  3)))
       (fill-region (point) (point-max) nil t))))
 
 ;;; handlers
@@ -2481,10 +2519,17 @@ keywords when no KEYWORD is given."
     (setq rcirc-nick (car args))
     (rcirc-update-prompt)
     (if rcirc-auto-authenticate-flag
-        (if rcirc-authenticate-before-join
+        (if (and rcirc-authenticate-before-join
+		 ;; We have to ensure that there's an authentication
+		 ;; entry for that server.  Else,
+		 ;; rcirc-authenticated-hook won't be triggered, and
+		 ;; autojoin won't happen at all.
+		 (let (auth-required)
+		   (dolist (s rcirc-authinfo auth-required)
+		     (when (string-match (car s) rcirc-server-name)
+		       (setq auth-required t)))))
             (progn
-              (with-rcirc-process-buffer process
-                (add-hook 'rcirc-authenticated-hook 'rcirc-join-channels-post-auth t t))
+	      (add-hook 'rcirc-authenticated-hook 'rcirc-join-channels-post-auth t t)
               (rcirc-authenticate))
           (rcirc-authenticate)
           (rcirc-join-channels process rcirc-startup-channels))
@@ -2544,10 +2589,13 @@ the only argument."
                 (member message
                         (list
                          (format "You are now identified for \C-b%s\C-b." rcirc-nick)
+			 (format "You are successfully identified as \C-b%s\C-b." rcirc-nick)
                          "Password accepted - you are now recognized."
                          )))
-               ;; place for other methods
-               )
+               (and ;; quakenet
+                (string= sender "Q")
+                (string= target rcirc-nick)
+                (string-match "\\`You are now logged in as .+\\.\\'" message)))
           (setq rcirc-user-authenticated t)
           (run-hook-with-args 'rcirc-authenticated-hook process)
           (remove-hook 'rcirc-authenticated-hook 'rcirc-join-channels-post-auth t))))))
@@ -2800,26 +2848,33 @@ Passwords are stored in `rcirc-authinfo' (which see)."
 	    (nick (caddr i))
 	    (method (cadr i))
 	    (args (cdddr i)))
-	(when (and (string-match server rcirc-server)
-		   (string-match nick rcirc-nick))
-	  (cond ((equal method 'nickserv)
-		 (rcirc-send-string
-		  process
-		  (concat "PRIVMSG " (or (cadr args) "nickserv")
-                          " :identify " (car args))))
-		((equal method 'chanserv)
-		 (rcirc-send-string
-		  process
-		  (concat
-		   "PRIVMSG chanserv :identify "
-		   (car args) " " (cadr args))))
-		((equal method 'bitlbee)
-		 (rcirc-send-string
-		  process
-		  (concat "PRIVMSG &bitlbee :identify " (car args))))
-		(t
-		 (message "No %S authentication method defined"
-			  method))))))))
+	(when (and (string-match server rcirc-server))
+          (if (and (memq method '(nickserv chanserv bitlbee))
+                   (string-match nick rcirc-nick))
+              ;; the following methods rely on the user's nickname.
+              (case method
+                (nickserv
+                 (rcirc-send-privmsg
+                  process
+                  (or (cadr args) "NickServ")
+                  (concat "IDENTIFY " (car args))))
+                (chanserv
+                 (rcirc-send-privmsg
+                  process
+                  "ChanServ"
+                  (format "IDENTIFY %s %s" (car args) (cadr args))))
+                (bitlbee
+                 (rcirc-send-privmsg
+                  process
+                  "&bitlbee"
+                  (concat "IDENTIFY " (car args)))))
+            ;; quakenet authentication doesn't rely on the user's nickname.
+            ;; the variable `nick' here represents the Q account name.
+            (when (eq method 'quakenet)
+              (rcirc-send-privmsg
+               process
+               "Q@CServe.quakenet.org"
+               (format "AUTH %s %s" nick (car args))))))))))
 
 (defun rcirc-handler-INVITE (process sender args text)
   (rcirc-print process sender "INVITE" nil (mapconcat 'identity args " ") t))
